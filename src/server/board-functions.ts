@@ -28,6 +28,7 @@ type D1NoteRow = {
 
 type UpsertNoteInput = {
   boardCode: string
+  clientId?: string
   note: {
     id: string
     content: string
@@ -42,6 +43,7 @@ type UpsertNoteInput = {
 type DeleteNoteInput = {
   boardCode: string
   noteId: string
+  clientId?: string
 }
 
 export const createBoard = createServerFn({ method: 'POST' }).handler(
@@ -129,7 +131,7 @@ export const upsertNote = createServerFn({ method: 'POST' })
       .bind(now, boardCode)
       .run()
 
-    await db
+    const insertResult = await db
       .prepare(
         `INSERT INTO notes (
           id, board_code, content, x, y, width, height, color, created_at, updated_at, updated_by
@@ -160,12 +162,23 @@ export const upsertNote = createServerFn({ method: 'POST' })
       )
       .run()
 
-    return {
-      ...note,
-      boardCode,
-      createdAt: now,
-      updatedAt: now,
-    } satisfies BoardNote
+    if (!insertResult.success) {
+      throw new Error('Note could not be saved.')
+    }
+
+    const savedNote = await getNote(db, boardCode, note.id)
+
+    if (!savedNote) {
+      throw new Error('Saved note could not be loaded.')
+    }
+
+    await broadcastBoardEvent(boardCode, {
+      type: 'note:upserted',
+      note: savedNote,
+      sourceClientId: normalizeClientId(data.clientId),
+    })
+
+    return savedNote
   })
 
 export const deleteNote = createServerFn({ method: 'POST' })
@@ -190,6 +203,13 @@ export const deleteNote = createServerFn({ method: 'POST' })
       )
       .bind(new Date().toISOString(), boardCode)
       .run()
+
+    await broadcastBoardEvent(boardCode, {
+      type: 'note:deleted',
+      boardCode,
+      noteId: data.noteId,
+      sourceClientId: normalizeClientId(data.clientId),
+    })
 
     return { ok: true }
   })
@@ -238,7 +258,9 @@ async function ensureSchema(db: D1Database) {
     .run()
 
   await db
-    .prepare(`CREATE INDEX IF NOT EXISTS notes_board_code_idx ON notes(board_code)`)
+    .prepare(
+      `CREATE INDEX IF NOT EXISTS notes_board_code_idx ON notes(board_code)`,
+    )
     .run()
 }
 
@@ -301,6 +323,68 @@ function toBoard(board: D1BoardRow, notes: Array<D1NoteRow>): Board {
   }
 }
 
+async function getNote(db: D1Database, boardCode: string, noteId: string) {
+  const note = await db
+    .prepare(
+      `SELECT id, board_code, content, x, y, width, height, color, created_at, updated_at
+       FROM notes
+       WHERE board_code = ? AND id = ?`,
+    )
+    .bind(boardCode, noteId)
+    .first<D1NoteRow>()
+
+  return note ? toBoardNote(note) : null
+}
+
+function toBoardNote(note: D1NoteRow): BoardNote {
+  return {
+    id: note.id,
+    boardCode: note.board_code,
+    content: note.content,
+    x: note.x,
+    y: note.y,
+    width: note.width,
+    height: note.height,
+    color: note.color,
+    createdAt: note.created_at,
+    updatedAt: note.updated_at,
+  }
+}
+
+async function broadcastBoardEvent(
+  boardCode: string,
+  event:
+    | {
+        type: 'note:upserted'
+        note: BoardNote
+        sourceClientId?: string
+      }
+    | {
+        type: 'note:deleted'
+        boardCode: string
+        noteId: string
+        sourceClientId?: string
+      },
+) {
+  const roomNamespace = env.BOARD_ROOM
+
+  if (!roomNamespace) {
+    return
+  }
+
+  try {
+    const roomId = roomNamespace.idFromName(boardCode)
+    const room = roomNamespace.get(roomId)
+
+    await room.fetch(`https://board-room/${boardCode}/broadcast`, {
+      method: 'POST',
+      body: JSON.stringify(event),
+    })
+  } catch {
+    // Realtime fan-out is best-effort; D1 remains the source of truth.
+  }
+}
+
 async function getActorHash() {
   const ip =
     getRequestHeader('cf-connecting-ip') ??
@@ -314,6 +398,14 @@ async function getActorHash() {
     .slice(0, 8)
     .map((byte) => byte.toString(16).padStart(2, '0'))
     .join('')
+}
+
+function normalizeClientId(value: string | undefined) {
+  if (!value || value.length > 80) {
+    return undefined
+  }
+
+  return value
 }
 
 function clamp(value: number, min: number, max: number) {

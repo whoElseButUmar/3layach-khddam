@@ -4,6 +4,16 @@ A no-login TanStack Start sticky-board app for Cloudflare Workers. Opening `/`
 creates a new six-letter board code. Sharing `/{CODE}` lets another person read
 and edit the same board.
 
+Production uses Cloudflare-native services:
+
+- Workers + static assets for the TanStack Start app.
+- D1 (`BOARD_DB`) for durable board and note storage.
+- SQLite-backed Durable Objects (`BOARD_ROOM`) for board-scoped WebSocket rooms.
+
+KV and R2 are intentionally not bound right now: sticky notes are structured text
+records, so D1 is the correct source of truth and Durable Objects handle realtime
+fan-out without adding another storage product.
+
 # Getting Started
 
 To run this application:
@@ -45,7 +55,6 @@ If you prefer not to use Tailwind CSS:
 
 ## Linting & Formatting
 
-
 This project uses [eslint](https://eslint.org/) and [prettier](https://prettier.io/) for linting and formatting. Eslint is configured using [tanstack/eslint-config](https://tanstack.com/config/latest/docs/eslint). The following scripts are available:
 
 ```bash
@@ -53,7 +62,6 @@ npm run lint
 npm run format
 npm run check
 ```
-
 
 ## Deploy to Cloudflare Workers
 
@@ -68,9 +76,7 @@ This project uses the Cloudflare Vite plugin (configured in `vite.config.ts`) an
 
 For production env vars, run `wrangler secret put MY_VAR` for each secret listed in `.env.example`. Public (non-secret) vars go in `wrangler.jsonc` under `vars`.
 
-KV, D1, R2, and Durable Object bindings are configured in `wrangler.jsonc` — see https://developers.cloudflare.com/workers/wrangler/configuration/.
-
-
+D1 and Durable Object bindings are configured in `wrangler.jsonc` — see https://developers.cloudflare.com/workers/wrangler/configuration/.
 
 ## Routing
 
@@ -89,7 +95,7 @@ Now that you have two routes you can use a `Link` component to navigate between 
 To use SPA (Single Page Application) navigation you will need to import the `Link` component from `@tanstack/react-router`.
 
 ```tsx
-import { Link } from "@tanstack/react-router";
+import { Link } from '@tanstack/react-router'
 ```
 
 Then anywhere in your JSX you can use it like so:
@@ -157,11 +163,11 @@ const getServerTime = createServerFn({
 // Use in a component
 function MyComponent() {
   const [time, setTime] = useState('')
-  
+
   useEffect(() => {
     getServerTime().then(setTime)
   }, [])
-  
+
   return <div>Server time: {time}</div>
 }
 ```

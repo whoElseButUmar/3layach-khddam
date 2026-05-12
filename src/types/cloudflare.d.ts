@@ -25,8 +25,52 @@ interface D1Database {
   exec: (query: string) => Promise<D1Result>
 }
 
+interface DurableObjectId {}
+
+interface DurableObjectStub {
+  fetch: (request: Request | string, init?: RequestInit) => Promise<Response>
+}
+
+interface DurableObjectNamespace {
+  idFromName: (name: string) => DurableObjectId
+  get: (id: DurableObjectId) => DurableObjectStub
+}
+
+interface DurableObjectState {
+  acceptWebSocket: (socket: WebSocket) => void
+  getWebSockets: () => Array<WebSocket>
+}
+
+interface WebSocketPair {
+  0: WebSocket
+  1: WebSocket
+}
+
+interface WebSocketPairConstructor {
+  new (): WebSocketPair
+}
+
+declare const WebSocketPair: WebSocketPairConstructor
+
+interface ExecutionContext {
+  waitUntil: (promise: Promise<unknown>) => void
+  passThroughOnException: () => void
+}
+
+interface CloudflareEnv {
+  BOARD_DB?: D1Database
+  BOARD_ROOM: DurableObjectNamespace
+}
+
 declare module 'cloudflare:workers' {
+  export class DurableObject<TEnv = CloudflareEnv> {
+    protected ctx: DurableObjectState
+    protected env: TEnv
+    constructor(ctx: DurableObjectState, env: TEnv)
+  }
+
   export const env: {
     BOARD_DB?: D1Database
+    BOARD_ROOM?: DurableObjectNamespace
   }
 }

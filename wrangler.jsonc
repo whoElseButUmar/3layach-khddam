@@ -3,16 +3,30 @@
   "name": "3layach-khddam",
   "compatibility_date": "2026-05-11",
   "compatibility_flags": ["nodejs_compat"],
-  "main": "@tanstack/react-start/server-entry",
+  "main": "src/server-entry.ts",
   "observability": {
-    "enabled": true
+    "enabled": true,
   },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "BOARD_ROOM",
+        "class_name": "BoardRoom",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["BoardRoom"],
+    },
+  ],
   "d1_databases": [
     {
       "binding": "BOARD_DB",
       "database_name": "3layach-khddam",
-      "database_id": "00000000-0000-0000-0000-000000000000",
-      "migrations_dir": "migrations"
-    }
-  ]
+      "database_id": "75391118-cf15-46fd-8a87-f35e84e9a532",
+      "migrations_dir": "migrations",
+    },
+  ],
 }

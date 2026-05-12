@@ -7,6 +7,8 @@ import {
   Sparkles,
   Trash2,
   Unlink,
+  Wifi,
+  WifiOff,
 } from 'lucide-react'
 
 import { Badge } from '#/components/ui/badge'
@@ -17,10 +19,33 @@ import { createBoard, deleteNote, upsertNote } from '#/server/board-functions'
 import type { Board, BoardNote, NoteColor } from '#/types/board'
 
 type SaveState = 'saved' | 'saving' | 'dirty' | 'error'
+type RealtimeState = 'connecting' | 'connected' | 'offline'
 
 type LocalNote = BoardNote & {
   persisted: boolean
 }
+
+type RealtimeEvent =
+  | {
+      type: 'note:draft'
+      note: BoardNote
+      sourceClientId: string
+    }
+  | {
+      type: 'note:upserted'
+      note: BoardNote
+      sourceClientId?: string
+    }
+  | {
+      type: 'note:deleted'
+      boardCode: string
+      noteId: string
+      sourceClientId?: string
+    }
+  | {
+      type: 'presence'
+      connections: number
+    }
 
 const NOTE_COLORS: Array<NoteColor> = ['yellow', 'pink', 'blue', 'green']
 const NOTE_SIZE = { width: 250, height: 220 }
@@ -31,11 +56,20 @@ export function StickyBoard({ initialBoard }: { initialBoard: Board }) {
     initialBoard.notes.map((note) => ({ ...note, persisted: true })),
   )
   const [saveState, setSaveState] = React.useState<SaveState>('saved')
+  const [realtimeState, setRealtimeState] =
+    React.useState<RealtimeState>('connecting')
+  const [connections, setConnections] = React.useState(1)
   const [copied, setCopied] = React.useState(false)
   const [activeNoteId, setActiveNoteId] = React.useState<string | null>(null)
   const boardRef = React.useRef<HTMLDivElement | null>(null)
   const textAreaRefs = React.useRef(new Map<string, HTMLTextAreaElement>())
   const hasPositionedViewport = React.useRef(initialBoard.notes.length === 0)
+  const clientId = React.useRef(
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2),
+  )
+  const socketRef = React.useRef<WebSocket | null>(null)
 
   React.useEffect(() => {
     if (!activeNoteId) {
@@ -61,11 +95,143 @@ export function StickyBoard({ initialBoard }: { initialBoard: Board }) {
     hasPositionedViewport.current = true
   }, [notes])
 
+  const applyRemoteNote = React.useCallback(
+    (note: BoardNote, persisted: boolean) => {
+      setNotes((current) => {
+        const existing = current.find((item) => item.id === note.id)
+
+        if (!existing) {
+          return [...current, { ...note, persisted }]
+        }
+
+        return current.map((item) =>
+          item.id === note.id
+            ? { ...item, ...note, persisted: item.persisted || persisted }
+            : item,
+        )
+      })
+    },
+    [],
+  )
+
+  React.useEffect(() => {
+    let reconnectTimer: number | undefined
+    let shouldReconnect = true
+
+    const connect = () => {
+      const url = new URL(
+        `/api/boards/${boardCode}/realtime`,
+        window.location.href,
+      )
+      url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      url.searchParams.set('client', clientId.current)
+
+      setRealtimeState('connecting')
+
+      const socket = new WebSocket(url)
+      socketRef.current = socket
+
+      socket.addEventListener('open', () => setRealtimeState('connected'))
+      socket.addEventListener('message', (event) => {
+        const realtimeEvent = parseRealtimeEvent(event.data)
+
+        if (!realtimeEvent) {
+          return
+        }
+
+        if (
+          'sourceClientId' in realtimeEvent &&
+          realtimeEvent.sourceClientId === clientId.current
+        ) {
+          return
+        }
+
+        if (
+          realtimeEvent.type === 'note:draft' ||
+          realtimeEvent.type === 'note:upserted'
+        ) {
+          applyRemoteNote(
+            realtimeEvent.note,
+            realtimeEvent.type === 'note:upserted',
+          )
+        }
+
+        if (realtimeEvent.type === 'note:deleted') {
+          setNotes((current) =>
+            current.filter((note) => note.id !== realtimeEvent.noteId),
+          )
+        }
+
+        if (realtimeEvent.type === 'presence') {
+          setConnections(Math.max(1, realtimeEvent.connections))
+        }
+      })
+      socket.addEventListener('close', () => {
+        if (!shouldReconnect) {
+          return
+        }
+
+        setRealtimeState('offline')
+        reconnectTimer = window.setTimeout(connect, 1500)
+      })
+      socket.addEventListener('error', () => setRealtimeState('offline'))
+    }
+
+    connect()
+
+    return () => {
+      shouldReconnect = false
+      window.clearTimeout(reconnectTimer)
+      socketRef.current?.close()
+      socketRef.current = null
+    }
+  }, [applyRemoteNote, boardCode])
+
+  const sendRealtimeDraft = React.useCallback((note: BoardNote) => {
+    const socket = socketRef.current
+
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return
+    }
+
+    socket.send(
+      JSON.stringify({
+        type: 'note:draft',
+        note,
+        sourceClientId: clientId.current,
+      } satisfies RealtimeEvent),
+    )
+  }, [])
+
+  const sendRealtimeDelete = React.useCallback(
+    (noteId: string) => {
+      const socket = socketRef.current
+
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        return
+      }
+
+      socket.send(
+        JSON.stringify({
+          type: 'note:deleted',
+          boardCode,
+          noteId,
+          sourceClientId: clientId.current,
+        } satisfies RealtimeEvent),
+      )
+    },
+    [boardCode],
+  )
+
   const persistNote = React.useCallback(
     async (note: LocalNote) => {
       if (!note.content.trim()) {
         if (note.persisted) {
-          await deleteNote({ data: { boardCode, noteId: note.id } })
+          await deleteNote({
+            data: { boardCode, noteId: note.id, clientId: clientId.current },
+          })
+        } else {
+          sendRealtimeDelete(note.id)
         }
 
         setNotes((current) => current.filter((item) => item.id !== note.id))
@@ -79,6 +245,7 @@ export function StickyBoard({ initialBoard }: { initialBoard: Board }) {
         const savedNote = await upsertNote({
           data: {
             boardCode,
+            clientId: clientId.current,
             note: {
               id: note.id,
               content: note.content,
@@ -101,44 +268,49 @@ export function StickyBoard({ initialBoard }: { initialBoard: Board }) {
         setSaveState('error')
       }
     },
+    [boardCode, sendRealtimeDelete],
+  )
+
+  const createNoteAt = React.useCallback(
+    (clientX: number, clientY: number) => {
+      const board = boardRef.current
+
+      if (!board) {
+        return
+      }
+
+      const rect = board.getBoundingClientRect()
+      const x = clamp(clientX - rect.left - 28, 18, rect.width - 190)
+      const y = clamp(clientY - rect.top - 28, 92, rect.height - 150)
+      const now = new Date().toISOString()
+      const id = crypto.randomUUID()
+      const color = NOTE_COLORS[Math.floor(Math.random() * NOTE_COLORS.length)]
+
+      setNotes((current) => [
+        ...current,
+        {
+          id,
+          boardCode,
+          content: '',
+          x,
+          y,
+          width: NOTE_SIZE.width,
+          height: NOTE_SIZE.height,
+          color,
+          createdAt: now,
+          updatedAt: now,
+          persisted: false,
+        },
+      ])
+      setActiveNoteId(id)
+      setSaveState('dirty')
+    },
     [boardCode],
   )
 
-  const createNoteAt = React.useCallback((clientX: number, clientY: number) => {
-    const board = boardRef.current
-
-    if (!board) {
-      return
-    }
-
-    const rect = board.getBoundingClientRect()
-    const x = clamp(clientX - rect.left - 28, 18, rect.width - 190)
-    const y = clamp(clientY - rect.top - 28, 92, rect.height - 150)
-    const now = new Date().toISOString()
-    const id = crypto.randomUUID()
-    const color = NOTE_COLORS[Math.floor(Math.random() * NOTE_COLORS.length)]
-
-    setNotes((current) => [
-      ...current,
-      {
-        id,
-        boardCode,
-        content: '',
-        x,
-        y,
-        width: NOTE_SIZE.width,
-        height: NOTE_SIZE.height,
-        color,
-        createdAt: now,
-        updatedAt: now,
-        persisted: false,
-      },
-    ])
-    setActiveNoteId(id)
-    setSaveState('dirty')
-  }, [boardCode])
-
-  const handleBoardPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+  const handleBoardPointerDown = (
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => {
     if (event.button !== 0) {
       return
     }
@@ -177,6 +349,7 @@ export function StickyBoard({ initialBoard }: { initialBoard: Board }) {
     setNotes((current) => current.filter((item) => item.id !== note.id))
 
     if (!note.persisted) {
+      sendRealtimeDelete(note.id)
       setSaveState('saved')
       return
     }
@@ -184,7 +357,9 @@ export function StickyBoard({ initialBoard }: { initialBoard: Board }) {
     setSaveState('saving')
 
     try {
-      await deleteNote({ data: { boardCode, noteId: note.id } })
+      await deleteNote({
+        data: { boardCode, noteId: note.id, clientId: clientId.current },
+      })
       setSaveState('saved')
     } catch {
       setSaveState('error')
@@ -227,6 +402,10 @@ export function StickyBoard({ initialBoard }: { initialBoard: Board }) {
               <Sparkles className="size-3.5" />
               {notes.length}
             </Badge>
+            <RealtimeIndicator
+              connections={connections}
+              realtimeState={realtimeState}
+            />
             <div className="rounded-md border border-amber-950/15 bg-[#fff7c2] px-3 py-1.5 font-mono text-sm font-bold text-amber-950 shadow-[inset_0_1px_0_rgba(255,255,255,.9)]">
               {boardCode}
             </div>
@@ -277,12 +456,21 @@ export function StickyBoard({ initialBoard }: { initialBoard: Board }) {
                   textAreaRefs.current.delete(note.id)
                 }
               }}
-              onChange={(content) => updateNote(note.id, { content })}
+              onChange={(content) => {
+                const updatedAt = new Date().toISOString()
+                const updatedNote = { ...note, content, updatedAt }
+
+                updateNote(note.id, { content, updatedAt })
+                sendRealtimeDraft(updatedNote)
+              }}
               onDelete={() => void removeNote(note)}
               onBlur={() => void persistNote(note)}
               onDragEnd={(x, y) => {
-                const updatedNote = { ...note, x, y }
-                updateNote(note.id, { x, y })
+                const updatedAt = new Date().toISOString()
+                const updatedNote = { ...note, x, y, updatedAt }
+
+                updateNote(note.id, { x, y, updatedAt })
+                sendRealtimeDraft(updatedNote)
                 void persistNote(updatedNote)
               }}
             />
@@ -434,6 +622,60 @@ function SaveIndicator({ saveState }: { saveState: SaveState }) {
       {label}
     </Badge>
   )
+}
+
+function RealtimeIndicator({
+  connections,
+  realtimeState,
+}: {
+  connections: number
+  realtimeState: RealtimeState
+}) {
+  const label =
+    realtimeState === 'connected'
+      ? `${connections} live`
+      : realtimeState === 'connecting'
+        ? 'Joining'
+        : 'Offline'
+
+  return (
+    <Badge
+      className={cn(
+        'hidden min-w-20 justify-center sm:inline-flex',
+        realtimeState === 'offline' && 'bg-red-50/85 text-red-900',
+      )}
+    >
+      {realtimeState === 'connected' ? (
+        <Wifi className="size-3.5" />
+      ) : (
+        <WifiOff className="size-3.5" />
+      )}
+      {label}
+    </Badge>
+  )
+}
+
+function parseRealtimeEvent(data: unknown): RealtimeEvent | null {
+  if (typeof data !== 'string') {
+    return null
+  }
+
+  try {
+    const event = JSON.parse(data) as { type?: string }
+
+    if (
+      event.type === 'note:draft' ||
+      event.type === 'note:upserted' ||
+      event.type === 'note:deleted' ||
+      event.type === 'presence'
+    ) {
+      return event as RealtimeEvent
+    }
+  } catch {
+    return null
+  }
+
+  return null
 }
 
 function noteColorClass(color: NoteColor) {
